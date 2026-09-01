@@ -26,3 +26,4 @@ Then open <http://localhost:8000>.
 2. In the repo's Settings → Pages, set the source to the `main` branch, root
    folder.
 3. The site will be published at `https://<user>.github.io/<repo>/`.
+# deeppace-sim-site
