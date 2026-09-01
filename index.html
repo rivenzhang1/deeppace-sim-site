@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeepPace-Sim — Booking-Pace Forecasting</title>
+  <meta name="description" content="Motivation for DeepPace-Sim and the challenges of hotel demand forecasting with booking-pace (DTA) information." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <p class="kicker">DeepPace</p>
+      <h1>Forecasting hotel demand from the 2D booking-pace surface</h1>
+      <p class="lede">
+        Why treating booking history as a 2D surface over
+        <code>(arrival_date, DTA)</code> — instead of collapsing it into a 1D
+        time series — is the right way to think about hotel demand forecasting,
+        and why we built a synthetic benchmark to test that claim.
+      </p>
+      <nav class="toc" aria-label="Table of contents">
+        <a href="#motivation">Motivation</a>
+        <a href="#challenges">Challenges</a>
+        <a href="#references">References</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section id="motivation">
+      <h2>Motivation</h2>
+
+      <p>
+        Hotel demand forecasting is usually built on a 1D series of daily
+        totals, with pace expressed as a handful of hand-engineered features
+        (rooms on the books at 7/30/90 days out, pickup between two DTA
+        points, and so on). <strong>DeepPace-Sim</strong> starts from a
+        different premise: the real object being modelled is
+        <code>OTB(property, arrival_date, DTA)</code> — net rooms on the books
+        <code>DTA</code> days before an arrival date — a genuinely
+        two-dimensional surface, not a 1D series with extra columns bolted on.
+      </p>
+
+      <h3>The two axes carry different physics</h3>
+      <p>
+        Moving along <code>arrival_date</code> traverses seasonality and
+        demand level. Moving along <code>DTA</code> traverses
+        <em>pace</em> — how a fixed date fills over time. A model handed a
+        flattened feature vector has to rediscover that split from scratch; a
+        model handed the surface gets it as geometry.
+      </p>
+
+      <h3>The same on-books number can mean opposite things</h3>
+      <p>
+        At <code>DTA = 120</code>, a date that will sell out and a date that
+        will finish at 40% occupancy can both sit at the same low room count.
+        What separates them is context — day of week, season, events, and the
+        pace of neighbouring dates. Any model that maps
+        <code>OTB(d, k) → rooms_sold(d)</code> without that context is
+        guessing. This is not a hypothetical: it's a direct consequence of
+        <em>compression</em> — high-demand dates shift every booking-segment's
+        arrival distribution earlier, so peak and trough dates converge at
+        long lead times and only diverge close to arrival.
+      </p>
+
+      <h3>Calendar effects are diagonal</h3>
+      <p>
+        Since <code>booking_date = arrival_date − DTA</code>, a flash sale on
+        one booking date touches every arrival date at a different
+        <code>DTA</code> — it shows up as a diagonal streak in
+        <code>(arrival_date, DTA)</code> space, not a vertical or horizontal
+        one. The same is true of the booking-day-of-week ripple: reservations
+        are made mostly on weekdays, imprinting a 7-day oscillation along the
+        DTA axis whose phase depends on the arrival date's own day of week.
+        Features computed independently per <code>(arrival_date, DTA)</code>
+        cell cannot see either effect.
+      </p>
+
+      <h3>Why simulate instead of using real data</h3>
+      <p>
+        Real property-management-system extracts can tell you a model won or
+        lost, but never <em>why</em>. DeepPace-Sim generates data bottom-up
+        from individual reservations — a booking date, a party size, a
+        cancellation outcome — with capacity enforced by rejecting arrivals in
+        chronological order. Every latent that produced the data (true demand
+        intensity, true segment mixture, true arrival-time distribution,
+        turn-aways, the promo calendar) is persisted alongside it. That turns
+        the dataset into a benchmark: a model's recovered structure can be
+        checked against ground truth, not just its point forecasts.
+      </p>
+    </section>
+
+    <section id="challenges">
+      <h2>General challenges of forecasting with booking-pace information</h2>
+
+      <dl class="challenges">
+        <dt>Right-censoring on sold-out dates</dt>
+        <dd>
+          Observed <code>rooms_sold</code> understates true demand whenever a
+          date sells out — capacity rejects arrivals, it doesn't record them.
+          A plain regression loss systematically under-forecasts exactly the
+          peak dates that matter most operationally.
+        </dd>
+
+        <dt>Segment mixture varies by context, not just by property</dt>
+        <dd>
+          The same property books differently on a Tuesday in February than a
+          Saturday in July, because the mix of group / leisure / last-minute
+          reservations shifts with day-of-week, season, and events — not
+          because some fixed "shape" changed. Forecasters that fit one
+          global booking curve per property miss this.
+        </dd>
+
+        <dt>Compression collapses information at long lead times</dt>
+        <dd>
+          The pace curves of very different outcomes look nearly identical
+          far from arrival and only separate close-in. A model needs context
+          (season, DOW, events, capacity pressure) to break that ambiguity —
+          the raw on-books number alone is not enough.
+        </dd>
+
+        <dt>Calendar effects are diagonal, not axis-aligned</dt>
+        <dd>
+          Promotions and booking-day-of-week patterns live on the
+          <code>booking_date</code> axis, which cuts diagonally through
+          <code>(arrival_date, DTA)</code> space. Feature pipelines that treat
+          each arrival date independently cannot see them.
+        </dd>
+
+        <dt>Leakage across the as-of boundary is easy to introduce by accident</dt>
+        <dd>
+          A feature for as-of date <code>t</code> may only use booking
+          activity with <code>booking_date ≤ t</code>. Because the same
+          <code>DTA</code> corresponds to a different <code>booking_date</code>
+          for every arrival date, a single fixed DTA cutoff applied across a
+          window of arrival dates leaks future information.
+        </dd>
+
+        <dt>Non-stationarity: trend, shocks, and slow demand drift</dt>
+        <dd>
+          Occupancy trends up or down over multi-year horizons (recovery
+          ramps, organic growth), and individual properties carry persistent
+          runs of over- or under-performance that look like noise on any
+          single day but are structured over weeks.
+        </dd>
+
+        <dt>No ground truth in real PMS data</dt>
+        <dd>
+          Real extracts can score a model's accuracy but can't confirm
+          <em>why</em> it won — whether it actually recovered the underlying
+          demand structure, or got the right answer for the wrong reason.
+          That's only checkable against a simulator whose latents are known.
+        </dd>
+      </dl>
+    </section>
+
+    <section id="references">
+      <h2>References</h2>
+
+      <h3>Booking-curve &amp; pickup forecasting (closest prior art)</h3>
+      <ul class="refs">
+        <li>
+          Weatherford, L.R. &amp; Kimes, S.E. (2003).
+          <a href="https://www.semanticscholar.org/paper/609bf188ed3e27ac8f3769417ce4b96c0f8ffb6f">
+            "A comparison of forecasting methods for hotel revenue management."</a>
+          International Journal of Forecasting. The classic hotel pickup /
+          booking-curve forecasting comparison — the field's standard term
+          for what this project calls booking pace is "pickup" over the
+          "booking window."
+        </li>
+        <li>
+          <a href="https://www.semanticscholar.org/paper/073032c71cecfe82e584d54942fd9369b6fac5c3">
+            "The Booking Window Evolution and its Impact on Hotel Revenue
+            Management Forecasting"</a> (2018).
+        </li>
+        <li>
+          <a href="https://www.semanticscholar.org/paper/c50e3fe0c50dcc114dac121a235c3145040ab0a8">
+            "Hotel revenue management forecasting accuracy: the hidden impact
+            of booking windows"</a> (2021), Journal of Hospitality and Tourism
+          Insights.
+        </li>
+      </ul>
+
+      <h3>Real-world analog dataset</h3>
+      <ul class="refs">
+        <li>
+          Antonio, N., de Almeida, A. &amp; Nunes, L. (2019). "Hotel Booking
+          Demand Datasets." Data in Brief. Individual reservation-level
+          records (lead time, cancellation, rate) — similar granularity
+          philosophy, though 1D/tabular rather than a DTA surface. Public
+          copy:
+          <a href="https://www.kaggle.com/datasets/jessemostipak/hotel-booking-demand">
+            Kaggle: Hotel booking demand</a>.
+        </li>
+      </ul>
+
+      <h3>Deep probabilistic forecasting (Phase II baselines)</h3>
+      <ul class="refs">
+        <li>
+          Salinas, D., Flunkert, V. &amp; Gasthaus, J. (2017/2019).
+          <a href="https://arxiv.org/abs/1704.04110">
+            "DeepAR: Probabilistic Forecasting with Autoregressive Recurrent
+            Networks."</a>
+        </li>
+        <li>
+          Lim, B., Arık, S.O., Loeff, N. &amp; Pfister, T. (2019/2020).
+          <a href="https://arxiv.org/abs/1912.09363">
+            "Temporal Fusion Transformers for Interpretable Multi-horizon Time
+            Series Forecasting."</a> The interpretable-attention architecture
+          closest in spirit to an axial-attention encoder over
+          <code>(arrival_date, DTA)</code>.
+        </li>
+        <li>
+          <a href="https://github.com/awslabs/gluonts">awslabs/gluonts</a> —
+          reference implementations of DeepAR, TFT, and other probabilistic
+          forecasters; a natural source for baseline implementations.
+        </li>
+      </ul>
+
+      <h3>Related, not independently re-verified — confirm before citing</h3>
+      <ul class="refs">
+        <li>
+          Talluri, K.T. &amp; van Ryzin, G.J. <em>The Theory and Practice of
+          Revenue Management.</em> Springer. The standard revenue-management
+          textbook; covers booking-curve modelling and demand unconstraining /
+          censored-demand estimation directly relevant to
+          <code>unconstrained_demand</code> / <code>turned_away</code>.
+        </li>
+        <li>
+          MIT's <strong>PODS</strong> (Passenger Origin-Destination
+          Simulator), from Peter Belobaba's group — an airline
+          revenue-management simulator that generates individual passenger
+          bookings with capacity control enforced in chronological order.
+          Conceptually the closest prior art to DeepPace-Sim's "generate
+          bottom-up from reservations, reject in time order" design
+          principle. Academic/research testbed, not a public code repository
+          as far as we've found.
+        </li>
+      </ul>
+
+      <p class="note">
+        Note on terminology: framing <code>(arrival_date, DTA)</code> as an
+        explicit 2D surface with diagonal <code>booking_date</code> structure
+        — and arguing a model should exploit that geometry directly — doesn't
+        map onto a single named method in the revenue-management literature
+        found so far. It reads as a reframing of pickup/booking-window
+        forecasting in image/tensor terms, closer to matrix-structured deep
+        forecasting work (e.g. TFT) than to the classical 1D-per-date RM
+        pickup literature.
+      </p>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    <p>DeepPace-Sim — a synthetic hospitality booking-pace benchmark.</p>
+  </footer>
+</body>
+</html>
